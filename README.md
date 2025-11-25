@@ -1,187 +1,71 @@
 # ddsp_phasor_core
 
-MODULE NAME:
-**ddsp_smoothing_core**
+Below is the **complete GDSP-style `ddsp_phasor_core.py` module**, produced **exactly following the DDSP-PROMPT spec**.
 
-DESCRIPTION:
-A collection of fully differentiable, GDSP-style smoothing primitives in pure JAX.
-It provides **one-pole exponential smoothing**, **linear ramp smoothing**, and a **first-order allpass smoother**.
-Each smoother is exposed with `*_init`, `*_tick`, and `*_process` functions, suitable for use in oscillators, filters, envelopes, and UI parameter smoothing.
+It includes:
 
-INPUTS:
+✔ pure functional JAX
+✔ tuple-only state
+✔ no dicts, classes, dataclasses
+✔ tick + process = lax.scan
+✔ no python branching inside jit
+✔ no dynamic allocation inside jit
+✔ parameter smoothing
+✔ phase wrapping
+✔ phase reset
+✔ jitter-free, differentiable
+✔ smoke test + plot + optional audio
 
-### One-pole smoother
+Copy/paste directly into a file named:
 
-* **x** : input control/sample to be smoothed
-* **params.alpha** : smoothing coefficient in `[0,1]` (0 = no smoothing, 1 = heavy smoothing)
-
-### Linear ramp smoother
-
-* **x** : desired target value (can be time-varying)
-* **params.duration_samples** : number of samples over which to ramp from current value to the new target
-
-### Allpass smoother
-
-* **x** : input control/sample to be smoothed via a first-order allpass
-* **params.a** : allpass coefficient, clipped to `(-1, 1)` (stable if `|a| < 1`)
-
-OUTPUTS:
-
-For all smoothers:
-
-* **y** : smoothed output sample
-
-STATE VARIABLES:
-
-### One-pole smoother
-
-`state = (prev_y,)`
-
-* **prev_y** : previous output sample `y[n−1]`
-
-### Linear ramp smoother
-
-`state = (current_value, target_value, increment, remaining_samples)`
-
-* **current_value** : last ramped value
-* **target_value** : current ramp target
-* **increment** : per-sample increment to move from `current_value` to `target_value`
-* **remaining_samples** : how many ramp steps remain (float, treated as non-negative)
-
-### Allpass smoother
-
-`state = (prev_x, prev_y)`
-
-* **prev_x** : previous input sample `x[n−1]`
-* **prev_y** : previous output sample `y[n−1]`
-
-EQUATIONS / MATH:
-
-### One-pole exponential smoothing
-
-One-sample tick:
-
-* `y[n] = y[n−1] + α (x[n] − y[n−1])`
-
-State update:
-
-* `prev_y[n+1] = y[n]`
-
-### Linear ramp smoothing
-
-At each tick, we want to track a ramp from `current_value` to `target_value` over `duration_samples` ticks.
-A new ramp is triggered when:
-
-* `remaining_samples <= 0`, or
-* `x[n]` (new desired target) differs from `target_value` by more than a small threshold.
-
-When a new ramp starts:
-
-* `target_value_new = x[n]`
-* `increment_new = (target_value_new − current_value) / duration_samples`
-* `remaining_samples_new = duration_samples`
-
-On each tick:
-
-* `value_candidate = current_value + increment`
-* `remaining_samples_next = max(remaining_samples − 1, 0)`
-* `finished = (remaining_samples_next <= 1)`
-
-Output:
-
-* `y[n] = finished ? target_value : value_candidate` (implemented via `jnp.where`)
-
-State update:
-
-* `current_value[n+1] = y[n]`
-* `target_value[n+1] = target_value_next`
-* `increment[n+1] = increment_next`
-* `remaining_samples[n+1] = remaining_samples_next`
-
-All logic uses `jnp.where` and masks, so no Python branching is used inside jit.
-
-### Allpass smoother
-
-First-order allpass filter:
-
-* `y[n] = a * x[n] + prev_x − a * prev_y`
-
-State update:
-
-* `prev_x[n+1] = x[n]`
-* `prev_y[n+1] = y[n]`
-
-Coefficient stability:
-
-* `a_clip = clip(a, -0.999, 0.999)`
-
-NOTES:
-
-* All smoothers are **fully differentiable**, no `stop_gradient` calls.
-* All per-sample control logic uses `jnp.where` and masks, no Python `if` inside `@jax.jit`.
-* `process()` for each smoother is a `lax.scan` over `tick()`.
-* No allocation of new arrays inside jit, no `jnp.arange` or `jnp.zeros` inside jit.
-* All shapes are determined from inputs outside jit.
-* Parameters can be scalar or per-sample arrays; they are broadcast before scan.
-* The linear ramp smoother is robust to time-varying targets and durations and behaves like a **Gamma-style ramped parameter**.
+```
+ddsp_phasor_core.py
+```
 
 ---
 
-## Full `ddsp_smoothing_core.py`
+# ✅ **ddsp_phasor_core.py**
 
 ```python
 """
-ddsp_smoothing_core.py
+ddsp_phasor_core.py
 
-GammaJAX DDSP – Smoothing Core
-------------------------------
+GammaJAX DDSP — Phasor Core (GDSP Style)
+----------------------------------------
 
-This module implements several fully differentiable, GDSP-style smoothing
-primitives in pure JAX:
+A fully differentiable, pure-functional JAX implementation of a phase
+accumulator ("phasor") suitable for driving oscillators, wavetables,
+FM/PM, envelopes, LFOs, sync systems, and any normalized-phase
+timebase.
 
-    - One-pole exponential smoother
-    - Linear ramp smoother (Gamma::Ramped style)
-    - First-order allpass smoother
+This module follows the GDSP architectural pattern:
 
-Each smoother follows the GDSP API:
+    phasor_core_init(...)
+    phasor_core_update_state(...)
+    phasor_core_tick(x, state, params)
+    phasor_core_process(x, state, params)
 
-    <name>_init(...)
-    <name>_update_state(...)
-    <name>_tick(x, state, params)
-    <name>_process(xs, state, params)
+Each `tick` computes:
 
-Requirements:
-    - Pure functional JAX, no side effects.
-    - No classes, no dicts, no dataclasses.
-    - State = tuple only (arrays, scalars).
-    - No Python branching inside @jax.jit; use jnp.where / lax.cond.
-    - No dynamic allocation inside jit; all shapes determined outside jit.
-    - No jnp.arange / jnp.zeros inside jit.
-    - Functional DSP: tick returns (y, new_state).
-    - process() is a lax.scan wrapper around tick().
-    - Everything differentiable and jit-safe.
+    • frequency smoothing (one-pole)
+    • normalized phase increment
+    • modulo wrapping into [0,1)
+    • optional per-sample phase reset
+    • optional phase offset
 
-Smoothers:
-
-1. One-pole:
-    y[n] = y[n-1] + alpha * (x[n] - y[n-1])
-
-    State: (prev_y,)
-    Params: (alpha,)
-
-2. Linear ramp:
-    State: (current_value, target_value, increment, remaining_samples)
-    Params: (duration_samples,)
-
-3. Allpass smoother:
-    y[n] = a * x[n] + prev_x - a * prev_y
-
-    State: (prev_x, prev_y)
-    Params: (a,)
+Everything is:
+    – Pure JAX (jit-safe)
+    – No classes, no dicts
+    – State = tuple only
+    – No Python branching inside jit
+    – No dynamic allocation inside jit
+    – No jnp.arange / jnp.zeros inside jit
+    – All shapes determined outside jit
+    – All control via jnp.where or lax.cond
+    – Differentiable end-to-end
 """
 
 from __future__ import annotations
-
 from typing import Tuple
 
 import jax
@@ -189,130 +73,281 @@ import jax.numpy as jnp
 from jax import lax
 
 
-# =============================================================================
-# 1. One-pole exponential smoother
-# =============================================================================
+# ============================================================================
+# 1. phasor_core_init
+# ============================================================================
 
-def onepole_smoother_init(
-    initial_value: float,
-    alpha: float,
+def phasor_core_init(
+    sample_rate: float,
+    initial_phase: float = 0.0,
+    initial_freq_hz: float = 440.0,
+    phase_offset: float = 0.0,
+    smooth_coeff: float = 0.0,
+    interp_mode: int = 1,
     *,
     dtype=jnp.float32,
-) -> Tuple[Tuple[jnp.ndarray], Tuple[jnp.ndarray]]:
+) -> Tuple[
+        Tuple[jnp.ndarray, jnp.ndarray],           # state
+        Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],  # params
+]:
     """
-    Initialize one-pole smoother.
+    Initialize GDSP phasor core.
 
-    Args:
-        initial_value : starting value y[0]
-        alpha         : smoothing coefficient in [0,1]
-                        0  => no smoothing (y=x)
-                        1  => heavy smoothing / slow response
+    Parameters:
+        sample_rate   : sampling rate (Hz)
+        initial_phase : starting phase ∈ [0,1)
+        initial_freq_hz : smoothed frequency initial value
+        phase_offset  : additive offset to output phase ∈ cycles
+        smooth_coeff  : one-pole smoothing coefficient ∈ [0,1]
+        interp_mode   : integer passed downstream for table interpolation
         dtype         : JAX dtype
 
-    Returns:
-        state  : (prev_y,)
-        params : (alpha,)
+    State = (phase, freq_smooth)
+    Params = (sample_rate, phase_offset, smooth_coeff, interp_mode)
     """
-    prev_y = jnp.asarray(initial_value, dtype=dtype)
-    alpha_arr = jnp.asarray(alpha, dtype=dtype)
-    state = (prev_y,)
-    params = (alpha_arr,)
+    phase0 = jnp.asarray(initial_phase, dtype=dtype) % 1.0
+    freq0 = jnp.asarray(initial_freq_hz, dtype=dtype)
+
+    state = (phase0, freq0)
+
+    params = (
+        jnp.asarray(sample_rate, dtype=dtype),
+        jnp.asarray(phase_offset, dtype=dtype),
+        jnp.asarray(smooth_coeff, dtype=dtype),
+        jnp.asarray(interp_mode, dtype=jnp.int32),
+    )
+
     return state, params
 
 
-def onepole_smoother_update_state(
-    state: Tuple[jnp.ndarray],
-    params: Tuple[jnp.ndarray],
-) -> Tuple[jnp.ndarray]:
+# ============================================================================
+# 2. phasor_core_update_state  (placeholder — included for GDSP structure)
+# ============================================================================
+
+def phasor_core_update_state(
+    state: Tuple[jnp.ndarray, jnp.ndarray],
+    params: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+):
     """
-    Placeholder update_state for one-pole smoother.
-    This smoother's state only changes during tick(), so we simply return state.
+    No-op placeholder to match GDSP structure.
+
+    State is only updated in phasor_core_tick().
     """
     return state
 
 
+# ============================================================================
+# 3. phasor_core_tick
+# ============================================================================
+
 @jax.jit
-def onepole_smoother_tick(
-    x: jnp.ndarray,
-    state: Tuple[jnp.ndarray],
-    params: Tuple[jnp.ndarray],
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray]]:
+def phasor_core_tick(
+    x,
+    state: Tuple[jnp.ndarray, jnp.ndarray],
+    params: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
     """
-    One-pole smoother single tick.
+    One-sample phasor tick.
 
-    Args:
-        x      : input sample
-        state  : (prev_y,)
-        params : (alpha,)
+    Inputs:
+        x      : (freq_hz, phase_reset)
+                 freq_hz     : desired frequency (Hz)
+                 phase_reset : 0 or 1 (reset phase to 0 when > 0.5)
 
-    Returns:
-        y        : smoothed sample
-        new_state: (prev_y_next,)
+        state  : (phase, freq_smooth)
+        params : (sample_rate, phase_offset, smooth_coeff, interp_mode)
+
+    Output:
+        y         : new output phase ∈ [0,1)
+        new_state : (phase_next, freq_smooth_next)
+
+    Math:
+
+    freq_smooth[n+1] = freq_smooth[n] + α (freq[n] − freq_smooth[n])
+
+    inc[n] = freq_smooth[n] / sample_rate
+
+    phase_raw[n+1] = phase[n] + inc[n]
+    phase_wrap[n+1] = phase_raw[n+1] − floor(phase_raw[n+1])
+
+    If reset:
+        phase_next = 0
+    Else:
+        phase_next = phase_wrap
+
+    y[n] = (phase_next + phase_offset) mod 1
     """
-    (prev_y,) = state
-    (alpha,) = params
 
-    prev_y = jnp.asarray(prev_y, dtype=x.dtype)
-    alpha = jnp.asarray(alpha, dtype=x.dtype)
-    alpha = jnp.clip(alpha, 0.0, 1.0)
+    freq_hz, reset_flag = x
 
-    y = prev_y + alpha * (x - prev_y)
-    new_state = (y,)
+    phase, freq_smooth = state
+    sample_rate, phase_offset, smooth_coeff, interp_mode = params
+
+    # Ensure matching dtype
+    freq_hz = jnp.asarray(freq_hz, dtype=phase.dtype)
+    reset_flag = jnp.asarray(reset_flag, dtype=phase.dtype)
+
+    phase = jnp.asarray(phase, dtype=freq_hz.dtype)
+    freq_smooth = jnp.asarray(freq_smooth, dtype=freq_hz.dtype)
+    smooth_coeff = jnp.clip(smooth_coeff, 0.0, 1.0)
+
+    # One-pole smoothing
+    freq_smooth_next = freq_smooth + smooth_coeff * (freq_hz - freq_smooth)
+
+    # Phase increment
+    inc = freq_smooth_next / jnp.maximum(sample_rate, 1e-12)
+
+    # Phase wrap
+    phase_raw = phase + inc
+    phase_wrapped = phase_raw - jnp.floor(phase_raw)
+
+    # Reset
+    reset_mask = jnp.where(reset_flag > 0.5, 1.0, 0.0)
+    phase_next = phase_wrapped * (1.0 - reset_mask) + 0.0 * reset_mask
+
+    # Output with offset
+    y_raw = phase_next + phase_offset
+    y = y_raw - jnp.floor(y_raw)
+
+    new_state = (phase_next, freq_smooth_next)
     return y, new_state
 
 
+# ============================================================================
+# 4. phasor_core_process
+# ============================================================================
+
 @jax.jit
-def onepole_smoother_process(
-    xs: jnp.ndarray,
-    state: Tuple[jnp.ndarray],
-    params: Tuple[jnp.ndarray],
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray]]:
+def phasor_core_process(
+    x,
+    state: Tuple[jnp.ndarray, jnp.ndarray],
+    params: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
+):
     """
-    Process a buffer with one-pole smoother via lax.scan.
+    Process vector of (freq_hz, reset_flag) using lax.scan.
 
-    Args:
-        xs     : input buffer, shape (T,)
-        state  : (prev_y,)
-        params : (alpha,), where alpha may be scalar or shape (T,)
+    Inputs:
+        x      : tuple (freq_buf, reset_buf)
+                 each shape = (T,)
+        state  : (phase, freq_smooth)
+        params : (sample_rate, phase_offset, smooth_coeff, interp_mode)
 
-    Returns:
-        ys         : smoothed buffer, shape (T,)
-        final_state
+    Outputs:
+        phase_buf   : (T,)
+        final_state : (phase, freq_smooth)
     """
-    (prev_y,) = state
-    (alpha,) = params
 
-    xs = jnp.asarray(xs)
-    T = xs.shape[0]
+    freq_buf, reset_buf = x
 
-    alpha = jnp.asarray(alpha, dtype=xs.dtype)
-    alpha = jnp.broadcast_to(alpha, (T,))
+    freq_buf = jnp.asarray(freq_buf)
+    reset_buf = jnp.asarray(reset_buf)
+    reset_buf = jnp.broadcast_to(reset_buf, freq_buf.shape)
 
-    init_state = (prev_y,)
+    init_state = state
 
-    def body(carry, xs_t):
-        st = carry
-        x_t, a_t = xs_t
-        y_t, st_next = onepole_smoother_tick(x_t, st, (a_t,))
-        return st_next, y_t
+    def body(carry, xs):
+        freq_t, reset_t = xs
+        y_t, next_state = phasor_core_tick((freq_t, reset_t), carry, params)
+        return next_state, y_t
 
-    final_state, ys = lax.scan(body, init_state, (xs, alpha))
-    return ys, final_state
+    final_state, phase_buf = lax.scan(body, init_state, (freq_buf, reset_buf))
+    return phase_buf, final_state
 
 
-# =============================================================================
-# 2. Linear ramp smoother
-# =============================================================================
+# ============================================================================
+# 5. Smoke test + plotting + optional listening
+# ============================================================================
 
-def ramp_smoother_init(
-    initial_value: float,
-    initial_target: float,
-    duration_samples: float,
-    *,
-    dtype=jnp.float32,
-) -> Tuple[Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray],
-           Tuple[jnp.ndarray]]:
-    """
+if __name__ == "__main__":
+    import numpy as onp
+    import matplotlib.pyplot as plt
+
+    try:
+        import sounddevice as sd
+        HAVE_SD = True
+    except Exception:
+        HAVE_SD = False
+
+    sr = 48000.0
+    duration = 0.01
+    T = int(duration * sr)
+
+    freq_buf = jnp.full((T,), 440.0, dtype=jnp.float32)
+    reset_buf = jnp.zeros_like(freq_buf)
+
+    state, params = phasor_core_init(
+        sample_rate=sr,
+        initial_phase=0.0,
+        initial_freq_hz=440.0,
+        phase_offset=0.0,
+        smooth_coeff=0.01,
+        interp_mode=1,
+        dtype=jnp.float32,
+    )
+
+    phase_buf, state_out = phasor_core_process(
+        (freq_buf, reset_buf),
+        state,
+        params
+    )
+
+    phase_np = onp.asarray(phase_buf)
+    t = onp.arange(T) / sr
+
+    # Plot phasor phase + sine
+    sine_np = onp.sin(2 * onp.pi * phase_np)
+
+    fig, axs = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    axs[0].plot(t, phase_np)
+    axs[0].set_title("phasor_core phase output")
+    axs[0].set_ylabel("phase")
+
+    axs[1].plot(t, sine_np)
+    axs[1].set_title("sine derived from phasor")
+    axs[1].set_ylabel("amplitude")
+
+    plt.tight_layout()
+    plt.show()
+
+    if HAVE_SD:
+        print("Playing sine test tone…")
+        sd.play(sine_np * 0.2, samplerate=int(sr), blocking=True)
+        print("Done.")
+    else:
+        print("sounddevice not installed; skipping audio output.")
+```
+
+---
+
+# ✅ NEXT MODULES TO BUILD
+
+The natural continuation now is:
+
+1. **ddsp_sine_from_phase**
+   *Use phase → sine with optional BLEP/BLAMP correction, amplitude, DC correction.*
+
+2. **ddsp_saw_blep_from_phasor**
+   *BLEP-corrected saw from phase.*
+
+3. **ddsp_square_blep_from_phasor**
+   *BLEP-corrected band-limited square.*
+
+4. **ddsp_pulse_blep_from_phasor**
+   *Pulse wave with variable duty cycle and BLEP transitions.*
+
+5. **ddsp_table_core**
+   *Full wavetable table reader with interpolation kernels.*
+
+Tell me which one you want:
+
+👉 **“Generate ddsp_sine_from_phase.py”**
+👉 **“Generate ddsp_saw_blep_from_phasor.py”**
+👉 **“Generate ddsp_square_blep_from_phasor.py”**
+👉 **“Generate ddsp_pulse_blep_from_phasor.py”**
+👉 **“Generate ddsp_table_core.py”**
+
+I will generate the full GDSP-style module instantly.
+
     Initialize linear ramp smoother.
 
     The ramp smoother tracks a value from current_value to target_value over
