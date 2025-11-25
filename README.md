@@ -1,28 +1,3 @@
-# ddsp_phasor_core
-
-Below is the **complete GDSP-style `ddsp_phasor_core.py` module**, produced **exactly following the DDSP-PROMPT spec**.
-
-It includes:
-
-✔ pure functional JAX
-✔ tuple-only state
-✔ no dicts, classes, dataclasses
-✔ tick + process = lax.scan
-✔ no python branching inside jit
-✔ no dynamic allocation inside jit
-✔ parameter smoothing
-✔ phase wrapping
-✔ phase reset
-✔ jitter-free, differentiable
-✔ smoke test + plot + optional audio
-
-Copy/paste directly into a file named:
-
-```
-ddsp_phasor_core.py
-```
-
----
 
 # ✅ **ddsp_phasor_core.py**
 
